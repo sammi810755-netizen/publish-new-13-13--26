@@ -26,6 +26,7 @@ import {
   parseBlockContent,
   serializeBlockContent,
   visibleBlocks,
+  blocksToPlainText,
 } from "@/src/lib/blocks";
 import {
   childCount,
@@ -706,6 +707,8 @@ export default function PageEditor() {
         <MenuItem icon="content-duplicate" label="Duplicate page" onPress={onDuplicatePage} />
         <MenuItem icon="history" label="Save version" onPress={async () => { setPageMenu(false); await saveVersion({ pageId, title, icon, blocks: latestRef.current, label: "Manual save" }); toast.show("Version saved", "success"); }} />
         <MenuItem icon="clock-outline" label="Version history" onPress={() => { setPageMenu(false); router.push({ pathname: "/versions/[pageId]", params: { pageId } }); }} />
+        <MenuItem icon="share-variant-outline" label="Share\u2026" onPress={() => { setPageMenu(false); router.push({ pathname: "/share", params: { title: title || "Untitled", body: `${title}\n\n${blocksToPlainText(latestRef.current)}`, kind: "page" } }); }} />
+        <MenuItem icon="school-outline" label="Study & convert" onPress={() => { setPageMenu(false); router.push("/study"); }} />
         <MenuItem icon="trash-can-outline" label="Delete page" destructive onPress={() => { setPageMenu(false); setDeleteChoice(true); }} />
       </BottomSheet>
 

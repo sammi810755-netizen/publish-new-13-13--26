@@ -31,6 +31,7 @@ import {
 import { totalAttachmentBytes, readAnyFile } from "@/src/lib/files";
 import { exportNotes, ExportFormat } from "@/src/lib/exporter";
 import { NoteColorKey, noteSwatchHex } from "@/src/theme/colors";
+import { Intelligence } from "@/src/intelligence/engine";
 
 function humanSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -66,6 +67,14 @@ export default function Settings() {
   const [exportVisible, setExportVisible] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [rebuilding, setRebuilding] = useState(false);
+
+  const rebuildIndex = async () => {
+    setRebuilding(true);
+    const res = await Intelligence.rebuild();
+    setRebuilding(false);
+    toast.show(res ? `Search index rebuilt (${res.count} items)` : "Rebuilt search index", "success");
+  };
 
   const loadStats = useCallback(() => {
     (async () => {
@@ -250,6 +259,8 @@ export default function Settings() {
           <Row icon="harddisk" label="Storage used" c={c} testID="row-storage" right={<Text style={[styles.valueText, { color: c.muted }]}>{humanSize(stats.bytes)}</Text>} />
           <Divider c={c} />
           <Row icon="broom" label="Clear cache" c={c} testID="row-clear-cache" onPress={() => setConfirmClear(true)} right={<Chevron c={c} />} />
+          <Divider c={c} />
+          <Row icon="refresh" label={rebuilding ? "Rebuilding\u2026" : "Rebuild search index"} c={c} testID="row-rebuild-index" onPress={rebuilding ? undefined : rebuildIndex} right={<Chevron c={c} />} />
         </View>
 
         {/* About */}
@@ -257,9 +268,19 @@ export default function Settings() {
         <View style={[styles.card, { backgroundColor: c.surfaceSecondary, borderColor: c.border }]}>
           <Row icon="information-outline" label="Version" c={c} testID="row-version" right={<Text style={[styles.valueText, { color: c.muted }]}>{Constants.expoConfig?.version ?? "1.0.0"}</Text>} />
           <Divider c={c} />
-          <Row icon="shield-lock-outline" label="Privacy" c={c} testID="row-privacy" right={<Text style={[styles.valueText, { color: c.success }]}>100% offline</Text>} />
+          <Row icon="brain" label="Intelligence" c={c} testID="row-intel" right={<Text style={[styles.valueText, { color: c.success }]}>On-device</Text>} />
         </View>
-        <Text style={[styles.hint, { color: c.muted }]}>All your notes, images, audio and drawings are stored only on this device. Nothing is ever uploaded.</Text>
+
+        {/* Legal & Privacy */}
+        <Section title="Legal & Privacy" c={c} />
+        <View style={[styles.card, { backgroundColor: c.surfaceSecondary, borderColor: c.border }]}>
+          <Row icon="shield-lock-outline" label="Privacy Policy" c={c} testID="row-privacy" onPress={() => router.push({ pathname: "/legal", params: { tab: "privacy" } })} right={<Chevron c={c} />} />
+          <Divider c={c} />
+          <Row icon="file-document-outline" label="Terms & Conditions" c={c} testID="row-terms" onPress={() => router.push({ pathname: "/legal", params: { tab: "terms" } })} right={<Chevron c={c} />} />
+          <Divider c={c} />
+          <Row icon="database-lock-outline" label="Data Safety" c={c} testID="row-data-safety" onPress={() => router.push({ pathname: "/legal", params: { tab: "data" } })} right={<Chevron c={c} />} />
+        </View>
+        <Text style={[styles.hint, { color: c.muted }]}>Your notes, images, audio, drawings and all intelligence run locally on this device. Content is only ever uploaded when you explicitly use "Share as Link", which you can revoke anytime.</Text>
       </ScrollView>
 
       <ColorPickerSheet visible={colorVisible} current={settings.defaultColor} onSelect={(k) => setSetting("defaultColor", k as NoteColorKey)} onClose={() => setColorVisible(false)} />

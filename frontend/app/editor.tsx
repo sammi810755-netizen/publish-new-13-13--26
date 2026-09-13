@@ -720,7 +720,7 @@ export default function Editor() {
             <Text style={[styles.menuText, { color: c.onSurface }]}>Convert to checklist</Text>
           </Pressable>
         )}
-        <Pressable testID="opt-share" onPress={() => { setMenuVisible(false); setShareVisible(true); }} style={styles.menuRow}>
+        <Pressable testID="opt-share" onPress={() => { setMenuVisible(false); router.push({ pathname: "/share", params: { title: title || "Untitled", body: buildNoteText({ title, content, type }, items), kind: "note" } }); }} style={styles.menuRow}>
           <MaterialCommunityIcons name="share-variant-outline" size={22} color={c.onSurfaceTertiary} />
           <Text style={[styles.menuText, { color: c.onSurface }]}>Share note</Text>
         </Pressable>

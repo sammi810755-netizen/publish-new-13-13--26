@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Pressable,
-  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
@@ -14,439 +13,494 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { useApp, useTheme } from "@/src/context/AppContext";
 import { useToast } from "@/src/components/Toast";
-import { NotesGrid } from "@/src/components/NotesGrid";
+import { BottomSheet } from "@/src/components/Sheet";
 import { EmptyState } from "@/src/components/EmptyState";
-import { CreateFab, CreateType } from "@/src/components/CreateFab";
-import { SortSheet, FolderPickerSheet } from "@/src/components/Pickers";
-import { BottomSheet, ConfirmSheet } from "@/src/components/Sheet";
+import { Page } from "@/src/db/pages-types";
 import {
-  emptyTrash,
-  getNote,
-  listNotes,
-  permanentlyDeleteNote,
-  restoreNote,
-  trashNote,
-  updateNote,
-} from "@/src/db/repo";
-import { FilterKey, NoteListItem } from "@/src/db/types";
-import { exportNotes, ExportFormat } from "@/src/lib/exporter";
+  createPage,
+  deletePageCascade,
+  duplicatePage,
+  listAllPages,
+  listFavoritePages,
+  listTrashedPages,
+  permanentlyDeletePage,
+  restorePage,
+  searchPages,
+  updatePage,
+} from "@/src/db/pages-repo";
+import { Intelligence } from "@/src/intelligence/engine";
 
-const FILTERS: { key: FilterKey; label: string; icon: keyof typeof MaterialCommunityIcons.glyphMap }[] = [
-  { key: "all", label: "All", icon: "note-multiple-outline" },
-  { key: "favorites", label: "Favorites", icon: "heart-outline" },
-  { key: "pinned", label: "Pinned", icon: "pin-outline" },
-  { key: "archived", label: "Archive", icon: "archive-outline" },
-  { key: "trash", label: "Trash", icon: "trash-can-outline" },
-];
-
-function ActionButton({
-  icon,
-  label,
-  color,
-  onPress,
-}: {
-  icon: keyof typeof MaterialCommunityIcons.glyphMap;
-  label: string;
-  color: string;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable testID={`action-${label.toLowerCase()}`} onPress={onPress} style={styles.actionBtn}>
-      <MaterialCommunityIcons name={icon} size={22} color={color} />
-      <Text style={[styles.actionLabel, { color }]}>{label}</Text>
-    </Pressable>
-  );
+interface TreeNode extends Page {
+  children: TreeNode[];
 }
 
-export default function Home() {
+function buildTree(pages: Page[]): TreeNode[] {
+  const byId = new Map<string, TreeNode>();
+  pages.forEach((p) => byId.set(p.id, { ...p, children: [] }));
+  const roots: TreeNode[] = [];
+  byId.forEach((node) => {
+    if (node.parentPageId && byId.has(node.parentPageId)) {
+      byId.get(node.parentPageId)!.children.push(node);
+    } else {
+      roots.push(node);
+    }
+  });
+  const sortRec = (nodes: TreeNode[]) => {
+    nodes.sort((a, b) => a.orderIndex - b.orderIndex);
+    nodes.forEach((n) => sortRec(n.children));
+  };
+  sortRec(roots);
+  return roots;
+}
+
+const AI_TOOLS: {
+  key: string;
+  label: string;
+  icon: keyof typeof MaterialCommunityIcons.glyphMap;
+  route: string;
+}[] = [
+  { key: "ask", label: "Ask My Notes", icon: "message-question-outline", route: "/ask" },
+  { key: "search", label: "Smart Search", icon: "text-search", route: "/smart-search" },
+  { key: "graph", label: "Knowledge Graph", icon: "graph-outline", route: "/graph" },
+  { key: "collections", label: "Collections", icon: "shape-outline", route: "/collections" },
+  { key: "study", label: "Study", icon: "school-outline", route: "/study" },
+  { key: "insights", label: "Insights", icon: "lightbulb-on-outline", route: "/insights" },
+];
+
+export default function WorkspaceHome() {
   const c = useTheme();
-  const { settings, setSetting, dataVersion, refresh } = useApp();
   const router = useRouter();
   const toast = useToast();
   const insets = useSafeAreaInsets();
+  const { dataVersion, refresh } = useApp();
 
-  const [filter, setFilter] = useState<FilterKey>("all");
+  const [pages, setPages] = useState<Page[]>([]);
+  const [favorites, setFavorites] = useState<Page[]>([]);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [rawSearch, setRawSearch] = useState("");
-  const [search, setSearch] = useState("");
-  const [notes, setNotes] = useState<NoteListItem[]>([]);
-  const [refreshing, setRefreshing] = useState(false);
-
-  const [sortVisible, setSortVisible] = useState(false);
-  const [selectMode, setSelectMode] = useState(false);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [moveVisible, setMoveVisible] = useState(false);
-  const [exportVisible, setExportVisible] = useState(false);
-  const [confirmEmpty, setConfirmEmpty] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
-
-  useEffect(() => {
-    const t = setTimeout(() => setSearch(rawSearch), 250);
-    return () => clearTimeout(t);
-  }, [rawSearch]);
+  const [results, setResults] = useState<Page[] | null>(null);
+  const [mode, setMode] = useState<"tree" | "trash">("tree");
+  const [trashed, setTrashed] = useState<Page[]>([]);
+  const [menuFor, setMenuFor] = useState<Page | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const rows = await listNotes({ filter, search, sort: settings.sort });
-      setNotes(rows);
+      const [all, favs] = await Promise.all([listAllPages(false), listFavoritePages()]);
+      setPages(all);
+      setFavorites(favs);
     } catch (e) {
-      console.warn("[Home] failed to load notes", e);
-      setNotes([]);
-      toast.show("Couldn't load notes. Pull down to retry.", "error");
+      console.warn("[workspace] load failed", e);
+      toast.show("Couldn't load workspace", "error");
     }
-  }, [filter, search, settings.sort, toast]);
+  }, [toast]);
+
+  const loadTrash = useCallback(async () => {
+    try {
+      setTrashed(await listTrashedPages());
+    } catch {
+      setTrashed([]);
+    }
+  }, []);
 
   useFocusEffect(
     useCallback(() => {
       load();
-    }, [load, dataVersion]),
+      loadTrash();
+      // keep the local intelligence index fresh (incremental, non-blocking)
+      Intelligence.ensureIndex();
+    }, [load, loadTrash, dataVersion]),
   );
 
+  // ensure index once on first mount
   useEffect(() => {
-    load();
-  }, [load]);
+    Intelligence.ensureIndex();
+  }, []);
 
-  const onRefresh = async () => {
-    setRefreshing(true);
-    await load();
-    setRefreshing(false);
-  };
+  const runSearch = useCallback(async (q: string) => {
+    setRawSearch(q);
+    if (!q.trim()) {
+      setResults(null);
+      return;
+    }
+    try {
+      setResults(await searchPages(q));
+    } catch {
+      setResults([]);
+    }
+  }, []);
 
-  const exitSelect = () => {
-    setSelectMode(false);
-    setSelected(new Set());
-  };
+  const tree = useMemo(() => buildTree(pages), [pages]);
+  const pathOf = useCallback(
+    (p: Page): string => {
+      const map = new Map(pages.map((x) => [x.id, x]));
+      const parts: string[] = [];
+      let cur: Page | undefined = p;
+      let guard = 0;
+      while (cur && guard < 50) {
+        parts.unshift(cur.title || "Untitled");
+        cur = cur.parentPageId ? map.get(cur.parentPageId) : undefined;
+        guard += 1;
+      }
+      return parts.join("  /  ");
+    },
+    [pages],
+  );
 
-  const toggleSelect = (id: string) => {
-    setSelected((prev) => {
+  const toggleExpand = (id: string) =>
+    setExpanded((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
-      if (next.size === 0) setSelectMode(false);
       return next;
     });
-  };
 
-  const onPressNote = (n: NoteListItem) => {
-    if (selectMode) {
-      toggleSelect(n.id);
-      return;
-    }
-    if (filter === "trash") {
-      setSelectMode(true);
-      setSelected(new Set([n.id]));
-      return;
-    }
-    router.push({ pathname: "/editor", params: { id: n.id } });
-  };
-
-  const onLongPressNote = (n: NoteListItem) => {
-    setSelectMode(true);
-    toggleSelect(n.id);
-  };
-
-  const onCreate = (t: CreateType) => {
-    router.push({ pathname: "/editor", params: { type: t, action: t } });
-  };
-
-  const doBulk = async (fn: (id: string) => Promise<void>, msg: string) => {
-    const ids = Array.from(selected);
-    for (const id of ids) await fn(id);
-    exitSelect();
-    refresh();
-    toast.show(msg, "success");
-  };
-
-  const bulkExport = async (format: ExportFormat) => {
-    setExportVisible(false);
+  const newRootPage = async () => {
     try {
-      const list = [];
-      for (const id of Array.from(selected)) {
-        const n = await getNote(id);
-        if (n) list.push(n);
-      }
-      if (list.length === 0) return;
-      await exportNotes(list, format);
-      exitSelect();
+      const p = await createPage(null, {});
+      refresh();
+      router.push({ pathname: "/page/[id]", params: { id: p.id } });
     } catch {
-      toast.show("Export failed", "error");
+      toast.show("Couldn't create page", "error");
     }
   };
 
-  const emptyContent = useMemo(() => {
-    if (search.trim())
-      return <EmptyState icon="magnify" title="No notes found" subtitle="Try a different search." testID="empty-search" />;
-    switch (filter) {
-      case "favorites":
-        return <EmptyState icon="heart-outline" title="No favorite notes" subtitle="Tap the heart on a note to favorite it." testID="empty-fav" />;
-      case "pinned":
-        return <EmptyState icon="pin-outline" title="No pinned notes" subtitle="Pin important notes to keep them on top." testID="empty-pin" />;
-      case "archived":
-        return <EmptyState icon="archive-outline" title="No archived notes" subtitle="Archive notes to find them here." testID="empty-archive" />;
-      case "trash":
-        return <EmptyState icon="trash-can-outline" title="Trash is empty" subtitle="Deleted notes appear here for 30 days." testID="empty-trash" />;
-      default:
-        return <EmptyState icon="notebook-outline" title="No notes yet" subtitle="Tap + to create your first note." testID="empty-all" />;
+  const addChild = async (parentId: string) => {
+    setMenuFor(null);
+    try {
+      const p = await createPage(parentId, {});
+      refresh();
+      router.push({ pathname: "/page/[id]", params: { id: p.id } });
+    } catch {
+      toast.show("Couldn't create sub-page", "error");
     }
-  }, [filter, search]);
+  };
+
+  const renderNode = (node: TreeNode, depth: number): React.ReactNode => {
+    const hasKids = node.children.length > 0;
+    const isOpen = expanded.has(node.id);
+    return (
+      <View key={node.id}>
+        <View style={[styles.nodeRow, { paddingLeft: 8 + depth * 18 }]}>
+          <Pressable
+            testID={`expand-${node.id}`}
+            onPress={() => hasKids && toggleExpand(node.id)}
+            hitSlop={8}
+            style={styles.chevron}
+          >
+            {hasKids ? (
+              <MaterialCommunityIcons name={isOpen ? "chevron-down" : "chevron-right"} size={20} color={c.muted} />
+            ) : (
+              <View style={{ width: 20 }} />
+            )}
+          </Pressable>
+          <Pressable
+            testID={`page-row-${node.id}`}
+            onPress={() => router.push({ pathname: "/page/[id]", params: { id: node.id } })}
+            style={styles.nodeMain}
+          >
+            <Text style={styles.nodeIcon}>{node.icon}</Text>
+            <Text numberOfLines={1} style={[styles.nodeTitle, { color: c.onSurface }]}>
+              {node.title || "Untitled"}
+            </Text>
+            {node.isFavorite ? (
+              <MaterialCommunityIcons name="heart" size={13} color={c.brand} />
+            ) : null}
+          </Pressable>
+          <Pressable testID={`node-menu-${node.id}`} onPress={() => setMenuFor(node)} hitSlop={8} style={styles.nodeMenu}>
+            <MaterialCommunityIcons name="dots-horizontal" size={18} color={c.muted} />
+          </Pressable>
+        </View>
+        {hasKids && isOpen && node.children.map((ch) => renderNode(ch, depth + 1))}
+      </View>
+    );
+  };
 
   return (
     <View style={{ flex: 1, backgroundColor: c.surface, paddingTop: insets.top }}>
       <View style={styles.topBar}>
-        {selectMode ? (
-          <>
-            <Pressable testID="select-close" onPress={exitSelect} style={styles.iconBtn}>
-              <MaterialCommunityIcons name="close" size={24} color={c.onSurface} />
-            </Pressable>
-            <Text style={[styles.selectCount, { color: c.onSurface }]}>{selected.size} selected</Text>
-            <View style={{ width: 40 }} />
-          </>
-        ) : (
-          <>
-            <View style={styles.brandRow}>
-              <View style={[styles.logo, { backgroundColor: c.brand }]}>
-                <MaterialCommunityIcons name="notebook" size={20} color={c.onBrand} />
-              </View>
-              <Text style={[styles.brandText, { color: c.onSurface }]}>Notes</Text>
-            </View>
-            <View style={styles.topActions}>
-              <Pressable
-                testID="checklist-shortcut"
-                onPress={() => router.push({ pathname: "/editor", params: { type: "checklist", action: "checklist" } })}
-                style={styles.iconBtn}
-              >
-                <MaterialCommunityIcons name="checkbox-marked-outline" size={22} color={c.onSurface} />
-              </Pressable>
-              <Pressable testID="open-settings" onPress={() => router.push("/settings")} style={styles.iconBtn}>
-                <MaterialCommunityIcons name="cog-outline" size={22} color={c.onSurface} />
-              </Pressable>
-            </View>
-          </>
-        )}
+        <View style={styles.brandRow}>
+          <View style={[styles.logo, { backgroundColor: c.brand }]}>
+            <MaterialCommunityIcons name="file-tree" size={18} color={c.onBrand} />
+          </View>
+          <Text style={[styles.heading, { color: c.onSurface }]}>Workspace</Text>
+        </View>
+        <View style={styles.topActions}>
+          <Pressable testID="open-notes" onPress={() => router.push("/notes")} style={styles.iconBtn} hitSlop={6}>
+            <MaterialCommunityIcons name="notebook-outline" size={22} color={c.onSurface} />
+          </Pressable>
+          <Pressable testID="workspace-templates" onPress={() => router.push("/templates")} style={styles.iconBtn} hitSlop={6}>
+            <MaterialCommunityIcons name="shape-outline" size={22} color={c.onSurface} />
+          </Pressable>
+          <Pressable testID="workspace-calendar" onPress={() => router.push("/calendar")} style={styles.iconBtn} hitSlop={6}>
+            <MaterialCommunityIcons name="calendar-month-outline" size={22} color={c.onSurface} />
+          </Pressable>
+          <Pressable
+            testID="workspace-trash"
+            onPress={() => setMode((m) => (m === "trash" ? "tree" : "trash"))}
+            style={styles.iconBtn}
+            hitSlop={6}
+          >
+            <MaterialCommunityIcons name="trash-can-outline" size={22} color={mode === "trash" ? c.brand : c.onSurface} />
+          </Pressable>
+          <Pressable testID="open-settings" onPress={() => router.push("/settings")} style={styles.iconBtn} hitSlop={6}>
+            <MaterialCommunityIcons name="cog-outline" size={22} color={c.onSurface} />
+          </Pressable>
+        </View>
       </View>
 
-      {!selectMode && (
+      {mode === "tree" && (
         <View style={styles.searchWrap}>
           <View style={[styles.searchBar, { backgroundColor: c.surfaceTertiary, borderColor: c.border }]}>
             <MaterialCommunityIcons name="magnify" size={20} color={c.muted} />
             <TextInput
-              testID="search-input"
+              testID="workspace-search"
               value={rawSearch}
-              onChangeText={setRawSearch}
-              placeholder="Search notes"
+              onChangeText={runSearch}
+              placeholder="Search pages"
               placeholderTextColor={c.muted}
               style={[styles.searchInput, { color: c.onSurface }]}
-              returnKeyType="search"
             />
-            {rawSearch.length > 0 ? (
-              <Pressable testID="clear-search" onPress={() => setRawSearch("")}>
+            {rawSearch.length > 0 && (
+              <Pressable testID="clear-search" onPress={() => runSearch("")}>
                 <MaterialCommunityIcons name="close-circle" size={18} color={c.muted} />
               </Pressable>
-            ) : null}
+            )}
           </View>
-          <Pressable testID="open-sort" onPress={() => setSortVisible(true)} style={[styles.sortBtn, { backgroundColor: c.surfaceTertiary, borderColor: c.border }]}>
-            <MaterialCommunityIcons name="sort" size={20} color={c.onSurface} />
-          </Pressable>
         </View>
       )}
 
-      {!selectMode && (
-        <View style={styles.chipRowWrap}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
-            {FILTERS.map((f) => {
-              const active = filter === f.key;
-              return (
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={[styles.scroll, { paddingBottom: insets.bottom + 100 }]}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+      >
+        {mode === "tree" && results === null && (
+          <View style={styles.aiWrap}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.aiRow}>
+              {AI_TOOLS.map((t) => (
                 <Pressable
-                  key={f.key}
-                  testID={`filter-${f.key}`}
-                  onPress={() => setFilter(f.key)}
-                  style={[
-                    styles.chip,
-                    { backgroundColor: active ? c.brandTertiary : c.surfaceSecondary, borderColor: active ? c.brand : c.border },
-                  ]}
+                  key={t.key}
+                  testID={`ai-${t.key}`}
+                  onPress={() => router.push(t.route as any)}
+                  style={[styles.aiCard, { backgroundColor: c.brandTertiary, borderColor: c.brand }]}
                 >
-                  <MaterialCommunityIcons name={f.icon} size={15} color={active ? c.brand : c.onSurfaceTertiary} />
-                  <Text style={[styles.chipText, { color: active ? c.brand : c.onSurfaceTertiary }]}>{f.label}</Text>
+                  <MaterialCommunityIcons name={t.icon} size={20} color={c.brand} />
+                  <Text style={[styles.aiLabel, { color: c.brand }]}>{t.label}</Text>
                 </Pressable>
-              );
-            })}
-            <View style={[styles.chipDivider, { backgroundColor: c.border }]} />
-            <Pressable testID="filter-pages" onPress={() => router.push("/workspace")} style={[styles.chip, { backgroundColor: c.brandTertiary, borderColor: c.brand }]}>
-              <MaterialCommunityIcons name="file-tree" size={15} color={c.brand} />
-              <Text style={[styles.chipText, { color: c.brand }]}>Pages</Text>
-            </Pressable>
-            <Pressable testID="filter-folders" onPress={() => router.push("/folders")} style={[styles.chip, { backgroundColor: c.surfaceSecondary, borderColor: c.border }]}>
-              <MaterialCommunityIcons name="folder-outline" size={15} color={c.onSurfaceTertiary} />
-              <Text style={[styles.chipText, { color: c.onSurfaceTertiary }]}>Folders</Text>
-            </Pressable>
-            <Pressable testID="filter-labels" onPress={() => router.push("/labels")} style={[styles.chip, { backgroundColor: c.surfaceSecondary, borderColor: c.border }]}>
-              <MaterialCommunityIcons name="tag-outline" size={15} color={c.onSurfaceTertiary} />
-              <Text style={[styles.chipText, { color: c.onSurfaceTertiary }]}>Labels</Text>
-            </Pressable>
-          </ScrollView>
-        </View>
-      )}
+              ))}
+            </ScrollView>
+          </View>
+        )}
 
-      {filter === "trash" && notes.length > 0 && !selectMode ? (
-        <Pressable testID="empty-trash-button" onPress={() => setConfirmEmpty(true)} style={styles.emptyTrashBtn}>
-          <MaterialCommunityIcons name="delete-sweep-outline" size={18} color={c.error} />
-          <Text style={[styles.emptyTrashText, { color: c.error }]}>Empty Trash</Text>
-        </Pressable>
-      ) : null}
-
-      {notes.length === 0 ? (
-        emptyContent
-      ) : (
-        <ScrollView
-          style={{ flex: 1 }}
-          contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom + 120 }]}
-          showsVerticalScrollIndicator={false}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={c.brand} />}
-        >
-          <NotesGrid
-            notes={notes}
-            layout={settings.layout}
-            showPreview={settings.showPreviews}
-            onPressNote={onPressNote}
-            onLongPressNote={onLongPressNote}
-            selectedIds={selected}
-          />
-        </ScrollView>
-      )}
-
-      {!selectMode && <CreateFab onSelect={onCreate} />}
-
-      {selectMode && (
-        <View style={[styles.actionBar, { backgroundColor: c.surfaceSecondary, borderColor: c.border, paddingBottom: insets.bottom + 10 }]}>
-          {filter === "trash" ? (
-            <>
-              <ActionButton icon="restore" label="Restore" color={c.onSurface} onPress={() => doBulk(restoreNote, "Notes restored")} />
-              <ActionButton icon="delete-forever-outline" label="Delete" color={c.error} onPress={() => setConfirmDelete(true)} />
-            </>
+        {mode === "trash" ? (
+          trashed.length === 0 ? (
+            <EmptyState icon="trash-can-outline" title="Trash is empty" subtitle="Deleted pages appear here." testID="empty-page-trash" />
           ) : (
-            <>
-              <ActionButton icon="folder-move-outline" label="Move" color={c.onSurface} onPress={() => setMoveVisible(true)} />
-              {filter === "archived" ? (
-                <ActionButton icon="archive-arrow-up-outline" label="Unarchive" color={c.onSurface} onPress={() => doBulk((id) => updateNote(id, { isArchived: 0 }), "Notes unarchived")} />
-              ) : (
-                <ActionButton icon="archive-arrow-down-outline" label="Archive" color={c.onSurface} onPress={() => doBulk((id) => updateNote(id, { isArchived: 1 }), "Notes archived")} />
-              )}
-              <ActionButton icon="export-variant" label="Export" color={c.onSurface} onPress={() => setExportVisible(true)} />
-              <ActionButton icon="trash-can-outline" label="Delete" color={c.error} onPress={() => doBulk(trashNote, "Moved to trash")} />
-            </>
-          )}
-        </View>
+            trashed.map((p) => (
+              <View key={p.id} style={[styles.trashRow, { borderColor: c.border, backgroundColor: c.surfaceSecondary }]}>
+                <Text style={styles.nodeIcon}>{p.icon}</Text>
+                <Text numberOfLines={1} style={[styles.nodeTitle, { color: c.onSurface }]}>{p.title || "Untitled"}</Text>
+                <Pressable
+                  testID={`restore-${p.id}`}
+                  onPress={async () => { await restorePage(p.id); refresh(); loadTrash(); toast.show("Page restored", "success"); }}
+                  style={styles.trashAction}
+                >
+                  <MaterialCommunityIcons name="restore" size={20} color={c.onSurface} />
+                </Pressable>
+                <Pressable
+                  testID={`purge-${p.id}`}
+                  onPress={async () => { await permanentlyDeletePage(p.id); refresh(); loadTrash(); toast.show("Deleted forever", "success"); }}
+                  style={styles.trashAction}
+                >
+                  <MaterialCommunityIcons name="delete-forever-outline" size={20} color={c.error} />
+                </Pressable>
+              </View>
+            ))
+          )
+        ) : results !== null ? (
+          results.length === 0 ? (
+            <EmptyState icon="magnify" title="No pages found" subtitle="Try a different search." testID="empty-page-search" />
+          ) : (
+            results.map((p) => (
+              <Pressable
+                key={p.id}
+                testID={`result-${p.id}`}
+                onPress={() => router.push({ pathname: "/page/[id]", params: { id: p.id } })}
+                style={[styles.resultRow, { borderColor: c.border, backgroundColor: c.surfaceSecondary }]}
+              >
+                <Text style={styles.nodeIcon}>{p.icon}</Text>
+                <View style={{ flex: 1 }}>
+                  <Text numberOfLines={1} style={[styles.nodeTitle, { color: c.onSurface }]}>{p.title || "Untitled"}</Text>
+                  <Text numberOfLines={1} style={[styles.resultPath, { color: c.muted }]}>{pathOf(p)}</Text>
+                </View>
+                <MaterialCommunityIcons name="chevron-right" size={20} color={c.muted} />
+              </Pressable>
+            ))
+          )
+        ) : pages.length === 0 ? (
+          <EmptyState icon="file-tree" title="No pages yet" subtitle="Tap + to create your first page." testID="empty-workspace" />
+        ) : (
+          <>
+            <Pressable testID="workspace-attachments" onPress={() => router.push("/attachments")} style={[styles.favRow, { marginBottom: 4 }]}>
+              <MaterialCommunityIcons name="paperclip" size={16} color={c.brand} />
+              <Text style={[styles.nodeTitle, { color: c.onSurface }]}>Attachment Manager</Text>
+              <MaterialCommunityIcons name="chevron-right" size={18} color={c.muted} />
+            </Pressable>
+            {favorites.length > 0 && (
+              <View style={styles.section}>
+                <Text style={[styles.sectionTitle, { color: c.muted }]}>FAVORITES</Text>
+                {favorites.map((p) => (
+                  <Pressable
+                    key={p.id}
+                    testID={`fav-${p.id}`}
+                    onPress={() => router.push({ pathname: "/page/[id]", params: { id: p.id } })}
+                    style={styles.favRow}
+                  >
+                    <MaterialCommunityIcons name="heart" size={14} color={c.brand} />
+                    <Text style={styles.nodeIcon}>{p.icon}</Text>
+                    <Text numberOfLines={1} style={[styles.nodeTitle, { color: c.onSurface }]}>{p.title || "Untitled"}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            )}
+            <Text style={[styles.sectionTitle, { color: c.muted, marginLeft: 8 }]}>ALL PAGES</Text>
+            {tree.map((node) => renderNode(node, 0))}
+          </>
+        )}
+      </ScrollView>
+
+      {mode === "tree" && (
+        <Pressable testID="workspace-new" onPress={newRootPage} style={[styles.fab, { backgroundColor: c.brand, bottom: insets.bottom + 24 }]}>
+          <MaterialCommunityIcons name="plus" size={28} color={c.onBrand} />
+        </Pressable>
       )}
 
-      <SortSheet visible={sortVisible} current={settings.sort} onSelect={(s) => setSetting("sort", s)} onClose={() => setSortVisible(false)} />
-
-      <FolderPickerSheet
-        visible={moveVisible}
-        currentFolderId={null}
-        onSelect={(fid) => doBulk((id) => updateNote(id, { folderId: fid }), "Notes moved")}
-        onClose={() => setMoveVisible(false)}
-      />
-
-      <BottomSheet visible={exportVisible} onClose={() => setExportVisible(false)} title="Export as" testID="export-sheet">
-        {(["txt", "md", "pdf"] as ExportFormat[]).map((fmt) => (
-          <Pressable key={fmt} testID={`export-${fmt}`} onPress={() => bulkExport(fmt)} style={styles.exportRow}>
-            <MaterialCommunityIcons
-              name={fmt === "pdf" ? "file-pdf-box" : fmt === "md" ? "language-markdown" : "file-document-outline"}
-              size={22}
-              color={c.brand}
+      {/* per-node menu */}
+      <BottomSheet visible={!!menuFor} onClose={() => setMenuFor(null)} title={menuFor?.title || "Page"} testID="node-menu-sheet">
+        {menuFor && (
+          <View>
+            <MItem icon="file-plus-outline" label="Add sub-page" onPress={() => addChild(menuFor.id)} />
+            <MItem
+              icon={menuFor.isFavorite ? "heart" : "heart-outline"}
+              label={menuFor.isFavorite ? "Remove favorite" : "Add to favorites"}
+              onPress={async () => { await updatePage(menuFor.id, { isFavorite: menuFor.isFavorite ? 0 : 1 }); setMenuFor(null); refresh(); }}
             />
-            <Text style={[styles.exportText, { color: c.onSurface }]}>{fmt.toUpperCase()}</Text>
-          </Pressable>
-        ))}
+            <MItem
+              icon="content-duplicate"
+              label="Duplicate"
+              onPress={async () => { await duplicatePage(menuFor.id); setMenuFor(null); refresh(); toast.show("Page duplicated", "success"); }}
+            />
+            <MItem
+              icon="trash-can-outline"
+              label="Delete"
+              destructive
+              onPress={async () => { await deletePageCascade(menuFor.id); setMenuFor(null); refresh(); loadTrash(); toast.show("Moved to trash", "success"); }}
+            />
+          </View>
+        )}
       </BottomSheet>
-
-      <ConfirmSheet
-        visible={confirmEmpty}
-        title="Empty Trash?"
-        message="All notes in Trash will be permanently deleted. This cannot be undone."
-        confirmLabel="Empty Trash"
-        destructive
-        onCancel={() => setConfirmEmpty(false)}
-        onConfirm={async () => {
-          setConfirmEmpty(false);
-          await emptyTrash();
-          refresh();
-          toast.show("Trash emptied", "success");
-        }}
-      />
-
-      <ConfirmSheet
-        visible={confirmDelete}
-        title="Delete forever?"
-        message={`${selected.size} note(s) will be permanently deleted.`}
-        confirmLabel="Delete"
-        destructive
-        onCancel={() => setConfirmDelete(false)}
-        onConfirm={async () => {
-          setConfirmDelete(false);
-          await doBulk(permanentlyDeleteNote, "Deleted permanently");
-        }}
-      />
     </View>
   );
 }
 
+function MItem({
+  icon,
+  label,
+  onPress,
+  destructive,
+}: {
+  icon: keyof typeof MaterialCommunityIcons.glyphMap;
+  label: string;
+  onPress: () => void;
+  destructive?: boolean;
+}) {
+  const c = useTheme();
+  const color = destructive ? c.error : c.onSurface;
+  return (
+    <Pressable testID={`nodemenu-${label}`} onPress={onPress} style={styles.menuItem}>
+      <MaterialCommunityIcons name={icon} size={22} color={color} />
+      <Text style={[styles.menuLabel, { color }]}>{label}</Text>
+    </Pressable>
+  );
+}
+
 const styles = StyleSheet.create({
-  topBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 16,
-    height: 56,
-  },
+  topBar: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", height: 56, paddingHorizontal: 12 },
   brandRow: { flexDirection: "row", alignItems: "center", gap: 10 },
-  logo: { width: 34, height: 34, borderRadius: 11, alignItems: "center", justifyContent: "center" },
-  brandText: { fontSize: 22, fontWeight: "800", letterSpacing: -0.5 },
-  topActions: { flexDirection: "row", alignItems: "center", gap: 4 },
-  iconBtn: { width: 40, height: 40, borderRadius: 12, alignItems: "center", justifyContent: "center" },
-  selectCount: { fontSize: 17, fontWeight: "700" },
-  searchWrap: { flexDirection: "row", gap: 10, paddingHorizontal: 16, paddingTop: 4, paddingBottom: 10 },
+  logo: { width: 32, height: 32, borderRadius: 10, alignItems: "center", justifyContent: "center" },
+  iconBtn: { width: 38, height: 40, alignItems: "center", justifyContent: "center" },
+  heading: { fontSize: 21, fontWeight: "800", letterSpacing: -0.5 },
+  topActions: { flexDirection: "row", alignItems: "center" },
+  searchWrap: { paddingHorizontal: 16, paddingBottom: 10 },
   searchBar: {
-    flex: 1,
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    height: 48,
+    height: 46,
     borderRadius: 999,
     paddingHorizontal: 16,
     borderWidth: StyleSheet.hairlineWidth,
   },
   searchInput: { flex: 1, fontSize: 15 },
-  sortBtn: { width: 48, height: 48, borderRadius: 16, alignItems: "center", justifyContent: "center", borderWidth: StyleSheet.hairlineWidth },
-  chipRowWrap: { height: 56, justifyContent: "center" },
-  chipRow: { paddingHorizontal: 16, gap: 8, alignItems: "center" },
-  chip: {
+  scroll: { paddingHorizontal: 12, paddingTop: 4 },
+  aiWrap: { marginBottom: 12 },
+  aiRow: { gap: 10, paddingHorizontal: 4, paddingVertical: 2 },
+  aiCard: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
-    height: 36,
+    gap: 8,
     paddingHorizontal: 14,
-    borderRadius: 999,
+    height: 44,
+    borderRadius: 14,
     borderWidth: StyleSheet.hairlineWidth,
-    flexShrink: 0,
   },
-  chipText: { fontSize: 13, fontWeight: "600" },
-  chipDivider: { width: StyleSheet.hairlineWidth, height: 24, marginHorizontal: 4 },
-  emptyTrashBtn: { flexDirection: "row", alignItems: "center", gap: 6, alignSelf: "flex-end", paddingHorizontal: 20, paddingVertical: 8 },
-  emptyTrashText: { fontSize: 13, fontWeight: "700" },
-  scrollContent: { paddingHorizontal: 16, paddingTop: 8 },
-  actionBar: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 0,
+  aiLabel: { fontSize: 13.5, fontWeight: "700" },
+  section: { marginBottom: 14 },
+  sectionTitle: { fontSize: 12, fontWeight: "700", letterSpacing: 0.6, marginBottom: 6 },
+  favRow: { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 9, paddingHorizontal: 8 },
+  nodeRow: { flexDirection: "row", alignItems: "center", minHeight: 44 },
+  chevron: { width: 26, height: 40, alignItems: "center", justifyContent: "center" },
+  nodeMain: { flex: 1, flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 8 },
+  nodeIcon: { fontSize: 18 },
+  nodeTitle: { flex: 1, fontSize: 15, fontWeight: "600" },
+  nodeMenu: { width: 36, height: 40, alignItems: "center", justifyContent: "center" },
+  resultRow: {
     flexDirection: "row",
-    justifyContent: "space-around",
     alignItems: "center",
-    paddingTop: 12,
-    borderTopWidth: StyleSheet.hairlineWidth,
+    gap: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 8,
   },
-  actionBtn: { alignItems: "center", gap: 4, paddingHorizontal: 8 },
-  actionLabel: { fontSize: 11, fontWeight: "600" },
-  exportRow: { flexDirection: "row", alignItems: "center", gap: 14, paddingVertical: 15 },
-  exportText: { fontSize: 15, fontWeight: "600" },
+  resultPath: { fontSize: 12, marginTop: 2 },
+  trashRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 8,
+  },
+  trashAction: { width: 38, height: 38, alignItems: "center", justifyContent: "center" },
+  menuItem: { flexDirection: "row", alignItems: "center", gap: 14, paddingVertical: 14 },
+  menuLabel: { fontSize: 15, fontWeight: "600" },
+  fab: {
+    position: "absolute",
+    right: 20,
+    width: 56,
+    height: 56,
+    borderRadius: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "#000",
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 6,
+  },
 });
