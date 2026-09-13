@@ -7,7 +7,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTheme } from "@/src/context/AppContext";
 
 const APP_NAME = "Notes AI";
-const CONTACT = "support@notesai.app";
+const CONTACT = "jarvisai9077@gmail.com";
 const UPDATED = "August 2025";
 
 type Tab = "privacy" | "terms" | "data";

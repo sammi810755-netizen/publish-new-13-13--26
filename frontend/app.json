@@ -1,16 +1,16 @@
 {
   "expo": {
-    "name": "Notes",
+    "name": "Notes AI",
     "slug": "frontend",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "frontend",
+    "scheme": "notesai",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.emergent.vaultmobile.wbkcgw",
+      "bundleIdentifier": "com.notesai.mobile",
       "infoPlist": {
         "NSCameraUsageDescription": "Take photos to attach to your notes",
         "NSMicrophoneUsageDescription": "Record voice notes on your device",
@@ -24,12 +24,17 @@
         "backgroundColor": "#181715"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.emergent.vaultmobile.wbkcgw",
+      "package": "com.notesai.mobile",
       "permissions": [
         "CAMERA",
         "RECORD_AUDIO",
         "USE_BIOMETRIC",
-        "USE_FINGERPRINT"
+        "USE_FINGERPRINT",
+        "POST_NOTIFICATIONS",
+        "SCHEDULE_EXACT_ALARM",
+        "RECEIVE_BOOT_COMPLETED",
+        "VIBRATE",
+        "WAKE_LOCK"
       ]
     },
     "web": {
@@ -52,6 +57,12 @@
         "expo-local-authentication",
         {
           "faceIDPermission": "Unlock your private notes with Face ID"
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#E8752E"
         }
       ],
       [

@@ -290,6 +290,11 @@ export default function WorkspaceHome() {
                 </Pressable>
               ))}
             </ScrollView>
+            <Pressable testID="workspace-attachments" onPress={() => router.push("/attachments")} style={[styles.favRow, { marginTop: 8 }]}>
+              <MaterialCommunityIcons name="paperclip" size={16} color={c.brand} />
+              <Text style={[styles.nodeTitle, { color: c.onSurface }]}>Attachment Manager</Text>
+              <MaterialCommunityIcons name="chevron-right" size={18} color={c.muted} />
+            </Pressable>
           </View>
         )}
 

@@ -78,19 +78,33 @@ export default function Calendar() {
   const saveTask = async () => {
     if (!editor) return;
     const title = draftTitle.trim() || "Untitled task";
-    if (editor.id) {
-      await updateTask(editor.id, { title, status: editor.status, priority: editor.priority, dueDate: editor.dueDate, time: editor.time });
-    } else {
-      const t = await createTask({ title, status: editor.status, priority: editor.priority, dueDate: editor.dueDate });
-      if (t.dueDate && reminderSupported()) {
-        const when = new Date(`${t.dueDate}T${t.time ?? "09:00"}:00`);
-        const nid = await scheduleReminder("Task due", title, when);
-        if (nid) await updateTask(t.id, { reminderAt: when.toISOString(), notificationId: nid });
+    try {
+      if (editor.id) {
+        await updateTask(editor.id, { title, status: editor.status, priority: editor.priority, dueDate: editor.dueDate, time: editor.time });
+        toast.show("Task saved", "success");
+      } else {
+        const t = await createTask({ title, status: editor.status, priority: editor.priority, dueDate: editor.dueDate, time: editor.time });
+        let reminderMsg = "";
+        if (t.dueDate && reminderSupported()) {
+          const when = new Date(`${t.dueDate}T${t.time ?? "09:00"}:00`);
+          if (when.getTime() > Date.now()) {
+            const nid = await scheduleReminder("Task due", title, when);
+            if (nid) {
+              await updateTask(t.id, { reminderAt: when.toISOString(), notificationId: nid });
+              reminderMsg = " \u2022 reminder set";
+            } else {
+              reminderMsg = " \u2022 enable notifications for reminders";
+            }
+          }
+        }
+        toast.show(`Task saved${reminderMsg}`, "success");
       }
+      setEditor(null);
+      load();
+    } catch (e) {
+      console.warn("[calendar] saveTask failed", e);
+      toast.show("Couldn't save task. Please try again.", "error");
     }
-    setEditor(null);
-    load();
-    toast.show("Task saved", "success");
   };
 
   const cycleStatus = async (t: Task) => {
